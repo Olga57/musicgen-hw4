@@ -13,11 +13,9 @@ import time
 from pathlib import Path
 from tqdm import tqdm
 
-
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "wandb", "requests"], check=True)
 import wandb
 
-# ---------- paths ----------
 LOCAL_DATA_DIR = "/content/musiccaps_data"
 DATA_REPO_CLONE_DIR = "/content/te2_repo"
 AUDIOCRAFT_DIR = "/content/audiocraft"
@@ -33,24 +31,21 @@ INSTALL_LOG_PATH = os.path.join(OUTPUTS_DIR, "audiocraft_install.log")
 DATASET_CARD_PATH = os.path.join(OUTPUTS_DIR, "dataset_card.md")
 TRAIN_SUMMARY_PATH = os.path.join(OUTPUTS_DIR, "training_summary.json")
 
-# ---------- github ----------
 GITHUB_USER = "Olga57"
 DATA_GITHUB_REPO = "te2"
 DATA_GITHUB_BRANCH = "main"
-AUDIOCRAFT_FORK_REPO = "musicgen-hw4"
+AUDIOCRAFT_FORK_REPO = "audiocraft"
+GITHUB_TOKEN = "PASTE_YOUR_GITHUB_TOKEN_HERE"
 
-# ---------- wandb ----------
 WANDB_PROJECT = "musicgen-musiccaps-ft"
 WANDB_GROUP = "colab-finetune"
 WANDB_SETUP_RUN_NAME = f"musiccaps-setup-{RUN_TAG}"
 WANDB_TRAIN_RUN_NAME = f"musicgen-small-long-{RUN_TAG}"
 WANDB_POST_RUN_NAME = f"musicgen-postprocess-{RUN_TAG}"
 
-# ---------- env ----------
 MICROMAMBA_ROOT = "/content/micromamba_root"
 ENV_NAME = "audiocraft_bw"
 
-# ---------- train ----------
 TRAIN_EPOCHS = 50
 UPDATES_PER_EPOCH = 150
 LEARNING_RATE = 8e-6
@@ -59,7 +54,6 @@ os.makedirs(MANIFESTS_DIR, exist_ok=True)
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
 os.makedirs(f"{EGS_DIR}/train", exist_ok=True)
 os.makedirs(f"{EGS_DIR}/valid", exist_ok=True)
-
 
 def run(cmd, cwd=None, env=None, print_cmd=True, secret=False, capture_output=False, check=True):
     if print_cmd:
@@ -138,7 +132,6 @@ def normalize_music_json(meta):
         "production_quality": normalize_string(meta.get("production_quality", "")),
     }
 
-
 DATA_DIR = None
 
 if os.path.isdir(LOCAL_DATA_DIR):
@@ -155,10 +148,8 @@ else:
     if os.path.exists(DATA_REPO_CLONE_DIR):
         shutil.rmtree(DATA_REPO_CLONE_DIR)
 
-    gh_token = "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"
-
-    if gh_token:
-        repo_url = f"https://{GITHUB_USER}:{gh_token}@github.com/{GITHUB_USER}/{DATA_GITHUB_REPO}.git"
+    if GITHUB_TOKEN:
+        repo_url = f"https://{GITHUB_USER}:{GITHUB_TOKEN}@github.com/{GITHUB_USER}/{DATA_GITHUB_REPO}.git"
         secret_mode = True
     else:
         repo_url = f"https://github.com/{GITHUB_USER}/{DATA_GITHUB_REPO}.git"
@@ -197,7 +188,6 @@ else:
 
 assert DATA_DIR is not None and os.path.isdir(DATA_DIR), f"Не найдена папка с данными: {DATA_DIR}"
 
-
 WANDB_API_KEY = getpass.getpass("Вставь W&B API key: ").strip()
 assert WANDB_API_KEY, "W&B API key пустой"
 
@@ -216,7 +206,6 @@ try:
     print(f"✓ W&B login ok. Пользователь: {getattr(viewer, 'username', 'unknown')}")
 except Exception:
     print("✓ W&B login ok")
-
 
 print("\n===== CLEANUP BEFORE TRAIN =====")
 
@@ -274,7 +263,6 @@ except Exception as e:
 
 print("\n===== GPU AFTER CLEANUP =====")
 subprocess.run(["nvidia-smi"], check=False)
-
 
 entries = []
 files = sorted([f for f in os.listdir(DATA_DIR) if f.endswith(".wav")])
@@ -467,7 +455,6 @@ with wandb.init(
 
 print("✓ W&B setup artifacts logged")
 
-
 print("\nСоздаём новое env под Blackwell / CUDA 12.8...")
 
 MAMBA_ENV = os.environ.copy()
@@ -532,13 +519,17 @@ for cand in [
 if preload_libs:
     RUNTIME_ENV["LD_PRELOAD"] = ":".join(preload_libs)
 
-
 if os.path.isdir(AUDIOCRAFT_DIR):
     print(f"\nУдаляю старую локальную копию: {AUDIOCRAFT_DIR}")
     shutil.rmtree(AUDIOCRAFT_DIR)
 
 print("\nКлонируем AudioCraft из вашего форка...")
-run(["git", "clone", f"https://{GITHUB_USER}:{gh_token}@github.com/{GITHUB_USER}/{AUDIOCRAFT_FORK_REPO}.git", AUDIOCRAFT_DIR], secret=True)
+if GITHUB_TOKEN:
+    audiocraft_repo_url = f"https://{GITHUB_USER}:{GITHUB_TOKEN}@github.com/{GITHUB_USER}/{AUDIOCRAFT_FORK_REPO}.git"
+    run(["git", "clone", audiocraft_repo_url, AUDIOCRAFT_DIR], secret=True)
+else:
+    audiocraft_repo_url = f"https://github.com/{GITHUB_USER}/{AUDIOCRAFT_FORK_REPO}.git"
+    run(["git", "clone", audiocraft_repo_url, AUDIOCRAFT_DIR], secret=False)
 
 music_dataset_path = Path(f"{AUDIOCRAFT_DIR}/audiocraft/data/music_dataset.py")
 assert music_dataset_path.exists(), f"Не найден файл: {music_dataset_path}"
@@ -555,8 +546,32 @@ if bad_line in text:
 text = music_dataset_path.read_text(encoding="utf-8")
 assert good_line in text, "Исправленная строка не найдена в music_dataset.py"
 
-print("✓ AudioCraft из форка подтянут и проверен")
+train_py_path = Path(f"{AUDIOCRAFT_DIR}/audiocraft/train.py")
+assert train_py_path.exists(), f"Не найден файл: {train_py_path}"
 
+train_text = train_py_path.read_text(encoding="utf-8")
+
+old_mp_line = "    multiprocessing.set_start_method(cfg.mp_start_method)"
+new_mp_block = """    try:
+        current_mp_start = multiprocessing.get_start_method(allow_none=True)
+        if current_mp_start is None:
+            multiprocessing.set_start_method(cfg.mp_start_method)
+        elif current_mp_start != cfg.mp_start_method:
+            print(f"[mp] already set to {current_mp_start}, requested {cfg.mp_start_method}, keeping current")
+    except RuntimeError as e:
+        if "context has already been set" in str(e):
+            print(f"[mp] {e}")
+        else:
+            raise"""
+
+if old_mp_line in train_text and new_mp_block not in train_text:
+    train_text = train_text.replace(old_mp_line, new_mp_block)
+    train_py_path.write_text(train_text, encoding="utf-8")
+
+train_text = train_py_path.read_text(encoding="utf-8")
+assert new_mp_block in train_text, "Патч train.py не применился"
+
+print("✓ AudioCraft из форка подтянут и проверен")
 
 print("\nСтавим Blackwell-совместимый стек внутрь env...")
 
@@ -646,7 +661,6 @@ run_live(
 
 print("✓ Blackwell-совместимый стек и AudioCraft готовы")
 
-
 cfg_dir = f"{AUDIOCRAFT_DIR}/config/dset/audio"
 os.makedirs(cfg_dir, exist_ok=True)
 
@@ -668,7 +682,6 @@ with open(cfg_path, "w", encoding="utf-8") as f:
 
 print(f"✓ dset-конфиг создан: {cfg_path}")
 
-
 try:
     wandb.finish()
 except Exception:
@@ -679,8 +692,6 @@ TRAIN_ENV["USER"] = "root"
 TRAIN_ENV["AUDIOCRAFT_DORA_DIR"] = OUTPUTS_DIR
 TRAIN_ENV["PYTHONPATH"] = AUDIOCRAFT_DIR + (":" + TRAIN_ENV["PYTHONPATH"] if "PYTHONPATH" in TRAIN_ENV else "")
 TRAIN_ENV["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-
 TRAIN_ENV["WANDB_MODE"] = "disabled"
 
 print("ENV_PREFIX =", ENV_PREFIX)
@@ -693,17 +704,13 @@ cmd = [
     "dset=audio/musiccaps_ft",
     "model/lm/model_scale=small",
     "continue_from=//pretrained/facebook/musicgen-small",
-
-    # КРИТИЧЕСКАЯ ПРАВКА:
     "logging.log_wandb=false",
     "logging.log_tensorboard=true",
     "logging.log_updates=5",
-
     "deadlock.use=false",
     "autocast=true",
     "autocast_dtype=float16",
     "optim.ema.use=false",
-
     "dataset.batch_size=1",
     "dataset.num_workers=0",
     "dataset.segment_duration=2",
@@ -711,12 +718,10 @@ cmd = [
     "dataset.valid.num_samples=2",
     "dataset.evaluate.num_samples=0",
     "dataset.generate.num_samples=0",
-
     "++conditioner.text.merge_text_p=0.25",
     "++conditioner.text.drop_desc_p=0.5",
     "++conditioner.text.drop_other_p=0.5",
     "++conditioner.text.text_attributes=[genre_tags,general_mood,lead_instrument,accompaniment,tempo_and_rhythm,vocal_presence,production_quality]",
-
     f"optim.epochs={TRAIN_EPOCHS}",
     f"optim.updates_per_epoch={UPDATES_PER_EPOCH}",
     f"optim.lr={LEARNING_RATE}",
@@ -724,7 +729,6 @@ cmd = [
 
 print("\n🚀 ЗАПУСК ОБУЧЕНИЯ...")
 run_live(cmd, cwd=AUDIOCRAFT_DIR, env=TRAIN_ENV, log_path=TRAIN_LOG_PATH)
-
 
 xps_dir = Path(OUTPUTS_DIR) / "xps"
 latest_xp_dir = None
@@ -763,7 +767,6 @@ summary = {
 with open(TRAIN_SUMMARY_PATH, "w", encoding="utf-8") as f:
     json.dump(summary, f, ensure_ascii=False, indent=2)
 
-# После обучения можно нормально залить результаты отдельным run
 with wandb.init(
     project=WANDB_PROJECT,
     group=WANDB_GROUP,
